@@ -1,0 +1,92 @@
+import { promises as fs } from 'node:fs';
+import * as path from 'node:path';
+import {
+  parseBcSync,
+  serializeBcSync,
+  parseBcSyncLocal,
+  serializeBcSyncLocal,
+  type BcSyncConfig,
+  type BcSyncLocal,
+} from '@braincloud/cloudsync-core';
+
+const BCSYNC = '.bcsync';
+const BCSYNC_LOCAL = '.bcsync.local';
+
+/** Read the committed `.bcsync` config, or `undefined` if absent. */
+export async function readConfig(rootDir: string): Promise<BcSyncConfig | undefined> {
+  const text = await readFileOpt(path.join(rootDir, BCSYNC));
+  return text === undefined ? undefined : parseBcSync(text);
+}
+
+export async function writeConfig(rootDir: string, config: BcSyncConfig): Promise<void> {
+  await fs.writeFile(path.join(rootDir, BCSYNC), serializeBcSync(config), 'utf8');
+}
+
+/** Read the per-machine `.bcsync.local` state, or an empty object if absent. */
+export async function readLocalState(rootDir: string): Promise<BcSyncLocal> {
+  const text = await readFileOpt(path.join(rootDir, BCSYNC_LOCAL));
+  return text === undefined ? {} : parseBcSyncLocal(text);
+}
+
+export async function writeLocalState(rootDir: string, local: BcSyncLocal): Promise<void> {
+  await fs.writeFile(path.join(rootDir, BCSYNC_LOCAL), serializeBcSyncLocal(local), 'utf8');
+}
+
+/**
+ * Resolve the current git branch by reading `.git/HEAD` (no git binary needed). Walks up from
+ * `startDir` to find the repo. Returns `undefined` if not in a repo or in detached-HEAD state.
+ */
+export async function currentBranch(startDir: string): Promise<string | undefined> {
+  const gitDir = await findGitDir(startDir);
+  if (!gitDir) {
+    return undefined;
+  }
+  const head = await readFileOpt(path.join(gitDir, 'HEAD'));
+  const match = head?.match(/^ref:\s*refs\/heads\/(.+)\s*$/m);
+  return match ? match[1]!.trim() : undefined;
+}
+
+// --------------------------------------------------------------------------------------------
+// internals
+// --------------------------------------------------------------------------------------------
+
+async function findGitDir(startDir: string): Promise<string | undefined> {
+  let current = path.resolve(startDir);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const candidate = path.join(current, '.git');
+    const stat = await statOpt(candidate);
+    if (stat?.isDirectory()) {
+      return candidate;
+    }
+    if (stat?.isFile()) {
+      // Worktree/submodule: ".git" is a file containing "gitdir: <path>".
+      const text = (await readFileOpt(candidate)) ?? '';
+      const m = text.match(/^gitdir:\s*(.+)\s*$/m);
+      if (m) {
+        return path.resolve(current, m[1]!.trim());
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+async function readFileOpt(filePath: string): Promise<string | undefined> {
+  try {
+    return await fs.readFile(filePath, 'utf8');
+  } catch {
+    return undefined;
+  }
+}
+
+async function statOpt(filePath: string): Promise<import('node:fs').Stats | undefined> {
+  try {
+    return await fs.stat(filePath);
+  } catch {
+    return undefined;
+  }
+}
