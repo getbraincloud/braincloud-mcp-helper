@@ -9,13 +9,26 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "NOTICE"
   ],
+  "keywords": [
+    "braincloud",
+    "mcp",
+    "model-context-protocol",
+    "cloud-code",
+    "sync"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
-    "clean": "rm -rf dist"
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
     "@braincloud/cloudsync-core": "^0.1.0",
@@ -27,5 +40,18 @@
     "typescript": "^5.4.5",
     "vitest": "^1.6.0"
   },
-  "license": "UNLICENSED"
+  "license": "Apache-2.0",
+  "author": "bitHeads, Inc.",
+  "homepage": "https://getbraincloud.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/getbraincloud/braincloud-mcp-helper.git",
+    "directory": "packages/mcp-helper"
+  },
+  "bugs": {
+    "url": "https://github.com/getbraincloud/braincloud-mcp-helper/issues"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
 }

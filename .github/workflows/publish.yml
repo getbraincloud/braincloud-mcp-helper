@@ -1,0 +1,51 @@
+name: publish
+
+# Publishes both packages to npm when a version tag is pushed.
+#   v1.2.3        -> dist-tag "latest"  (stable / main channel)
+#   v1.2.3-dev.0  -> dist-tag "dev"     (preview / develop channel)
+# Stable users get the latest tag via `npx braincloud-mcp-helper`; preview users
+# opt in with `npx braincloud-mcp-helper@dev`.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  id-token: write # required for npm provenance (OIDC)
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          registry-url: https://registry.npmjs.org
+
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+      - name: Choose dist-tag from the version tag
+        id: disttag
+        run: |
+          if [[ "${GITHUB_REF_NAME}" == *-* ]]; then
+            echo "tag=dev" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=latest" >> "$GITHUB_OUTPUT"
+          fi
+
+      # cloudsync-core must publish first — mcp-helper depends on it.
+      - name: Publish @braincloud/cloudsync-core
+        run: npm publish -w @braincloud/cloudsync-core --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @braincloud/mcp-helper
+        run: npm publish -w @braincloud/mcp-helper --provenance --access public --tag ${{ steps.disttag.outputs.tag }}
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
