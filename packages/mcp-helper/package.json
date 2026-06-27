@@ -1,6 +1,6 @@
 {
   "name": "@braincloud/mcp-helper",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.0",
   "description": "Local stdio MCP server giving AI clients filesystem access for brainCloud cloud-code sync. Authenticates to brainCloud only via a short-lived ticket vended by the hosted braincloud-mcp.",
   "type": "module",
   "bin": {
@@ -31,7 +31,7 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
-    "@braincloud/cloudsync-core": "0.1.0",
+    "@braincloud/cloudsync-core": "0.2.0-dev.0",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.8"
   },
