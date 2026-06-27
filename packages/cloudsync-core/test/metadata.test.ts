@@ -105,6 +105,42 @@ describe('parseCcjs', () => {
     expect(parsed.metadata.clientCallable).toBe(true);
   });
 
+  it('parses a real server export block (ECMAScript-escaped: \\\' and \\\\\\" in parms)', () => {
+    // Captured verbatim from a real Builder export (blackjack/GetLeaderboard).
+    const real = String.raw`function main() {}
+main();
+
+${META_MARKER}
+// "scriptName":"GetLeaderboard",
+// "clientCallable":true,
+// "s2sCallable":false,
+// "peerCallable":false,
+// "scriptTimeout":20,
+// "description":"BlackJack: return the top players (by current balance) plus the caller\'s own coin score.",
+// "parms":"{\\\"count\\\":20}",
+// "version":5,
+// "updatedAt":1781486761127
+`;
+    const parsed = parseCcjs(real);
+    expect(parsed.metadata.scriptName).toBe('GetLeaderboard');
+    expect(parsed.metadata.clientCallable).toBe(true);
+    expect(parsed.metadata.scriptTimeout).toBe(20);
+    expect(parsed.metadata.description).toContain("caller's own coin score");
+    expect(parsed.metadata.parms).toBe('{"count":20}');
+  });
+
+  it('round-trips values containing quotes and apostrophes', () => {
+    const meta: ScriptMetadata = {
+      scriptName: 'x',
+      description: `it's a "quoted" note`,
+      parms: '{"count":20}',
+      clientCallable: true,
+    };
+    const parsed = parseCcjs(buildCcjs('main();', meta));
+    expect(parsed.metadata.description).toBe(meta.description);
+    expect(parsed.metadata.parms).toBe('{"count":20}');
+  });
+
   it('normalises CRLF line endings in the body', () => {
     const crlfFile = `${BODY.replace(/\n/g, '\r\n')}\r\n\r\n${META_MARKER}\r\n// "scriptName": "doThing"\r\n`;
     const parsed = parseCcjs(crlfFile);

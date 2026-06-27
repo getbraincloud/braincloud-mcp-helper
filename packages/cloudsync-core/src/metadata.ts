@@ -124,9 +124,19 @@ export function buildCcjs(body: string, metadata: ScriptMetadata): string {
 // internals
 // --------------------------------------------------------------------------------------------
 
-/** One metadata line: `// "key": <json-value>,` — always with a trailing comma (stripped on the last). */
+/** One metadata line: `// "key": <value>,` — always with a trailing comma (stripped on the last). */
 function metaLine(key: string, value: unknown): string {
-  return `// ${JSON.stringify(key)}: ${JSON.stringify(value)},`;
+  return `// ${JSON.stringify(key)}: ${escapeForBlock(JSON.stringify(value))},`;
+}
+
+/**
+ * brainCloud metadata blocks are ECMAScript-escaped, and the server's importer runs an
+ * ECMAScript-unescape ({@link ecmaUnescape}) before JSON-parsing. Doubling the backslashes in our
+ * JSON token is the inverse of that unescape, so the value survives both the server's import and our
+ * own round-trip read as valid JSON (e.g. a quote inside parms is written `\\"` → unescapes to `\"`).
+ */
+function escapeForBlock(jsonToken: string): string {
+  return jsonToken.replace(/\\/g, '\\\\');
 }
 
 /**
@@ -158,12 +168,59 @@ function parseMetadataBlock(block: string): ScriptMetadata {
     return {};
   }
   try {
-    return JSON.parse(`{${inner}}`) as ScriptMetadata;
+    // The block is ECMAScript-escaped (the server emits e.g. `\'` and `\\\"`, which plain JSON
+    // rejects). Mirror the server's importer: ECMAScript-unescape, then JSON-parse.
+    return JSON.parse(`{${ecmaUnescape(inner)}}`) as ScriptMetadata;
   } catch (err) {
     throw new CcjsParseError(
       `Failed to parse cloud-code metadata block: ${(err as Error).message}`
     );
   }
+}
+
+/**
+ * Reverse ECMAScript string escaping, mirroring the brainCloud server's import step (Apache
+ * Commons {@code StringEscapeUtils.unescapeEcmaScript}). Processes left-to-right so `\\` is consumed
+ * before the character after it — this is what turns the on-disk `\\\"` / `\\"` into a JSON `\"`
+ * (escaped quote preserved) while collapsing ECMAScript-only escapes like `\'` to `'`.
+ */
+function ecmaUnescape(text: string): string {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] !== '\\') {
+      out += text[i];
+      continue;
+    }
+    const next = text[i + 1];
+    if (next === undefined) {
+      out += '\\';
+      break;
+    }
+    switch (next) {
+      case '\\': out += '\\'; i++; break;
+      case '"': out += '"'; i++; break;
+      case "'": out += "'"; i++; break;
+      case '/': out += '/'; i++; break;
+      case 'b': out += '\b'; i++; break;
+      case 'f': out += '\f'; i++; break;
+      case 'n': out += '\n'; i++; break;
+      case 'r': out += '\r'; i++; break;
+      case 't': out += '\t'; i++; break;
+      case 'u': {
+        const hex = text.slice(i + 2, i + 6);
+        if (/^[0-9a-fA-F]{4}$/.test(hex)) {
+          out += String.fromCharCode(parseInt(hex, 16));
+          i += 5;
+        } else {
+          out += next;
+          i++;
+        }
+        break;
+      }
+      default: out += next; i++; break;
+    }
+  }
+  return out;
 }
 
 /** Normalise CRLF→LF and remove trailing whitespace/newlines (kept out of bodies and blocks). */
