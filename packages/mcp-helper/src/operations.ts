@@ -4,6 +4,7 @@ import {
   computeSyncHash,
   expandExportZip,
   getOrCreateBranchState,
+  merge3,
   removeBranchScript,
   upsertBranchScript,
   type BcSyncLocal,
@@ -12,9 +13,12 @@ import {
 } from '@braincloud/cloudsync-core';
 import { readScriptTree, writeScript, deleteScript } from './fs-tree.js';
 import {
+  deleteRemoteScript,
   exportScriptsZip,
+  getScriptVersionContent,
   importScriptsZip,
   listRemoteScripts,
+  updateRemoteScript,
   type HttpOptions,
   type RemoteScript,
   type SyncTicket,
@@ -153,9 +157,181 @@ export async function push(
   return { pushed, importSummary, skipped: plan.filter((p) => !applied.has(p.path)) };
 }
 
+export interface SyncResult {
+  /** Remote → local (new or changed remote scripts written). */
+  pulled: string[];
+  /** Local → remote (new or changed local scripts uploaded, via one bulk import). */
+  pushed: string[];
+  /** Both sides changed and were auto-merged cleanly (written locally + pushed). */
+  merged: string[];
+  /** Both sides reached identical content independently; base updated, nothing transferred. */
+  converged: string[];
+  /** Unresolved conflicts — a conflict-marked file was written locally for the developer. */
+  conflicted: string[];
+  deletedLocal: string[];
+  deletedRemote: string[];
+  inSync: string[];
+  /** The bulk-import summary, if any push/push-new scripts were uploaded. */
+  importSummary: unknown;
+}
+
+/**
+ * Full two-way sync for a branch: pulls non-conflicting remote changes, pushes non-conflicting
+ * local changes, and 3-way-merges scripts changed on both sides. Cleanly-merged scripts are written
+ * locally and pushed (version-locked); genuine conflicts are written with git-style markers and left
+ * for the developer. Deletions are applied only when allowDeletes is set. Base state is settled from
+ * a final remote listing so the next status is clean.
+ */
+export async function sync(
+  rootDir: string,
+  ticket: SyncTicket,
+  branch: string,
+  options: SyncOptions = {}
+): Promise<SyncResult> {
+  const plan = await syncStatus(rootDir, ticket, branch, options);
+  const remoteMeta = byPathRemote(await listRemoteScripts(ticket, options));
+  const localTree = byPath(await readScriptTree(rootDir));
+  const local = await readLocalState(rootDir);
+  const baseScripts = local[branch]?.scripts ?? {};
+
+  // Remote bodies are only needed for pulls and conflict merges — fetch the export zip once.
+  const needsRemoteBodies = plan.some((p) =>
+    p.action === 'pull' || p.action === 'pull-new' || p.action === 'conflict'
+  );
+  const remoteBodies = needsRemoteBodies
+    ? byPath(expandExportZip(await exportScriptsZip(ticket, options)))
+    : new Map<string, ZipScript>();
+
+  const result: SyncResult = {
+    pulled: [], pushed: [], merged: [], converged: [], conflicted: [],
+    deletedLocal: [], deletedRemote: [], inSync: [], importSummary: null,
+  };
+  const pushPaths: string[] = [];
+  const settled = new Set<string>(); // paths whose base should be refreshed at the end
+
+  for (const status of plan) {
+    const path = status.path;
+    switch (status.action) {
+      case 'in-sync':
+        result.inSync.push(path);
+        break;
+
+      case 'pull':
+      case 'pull-new': {
+        const rs = remoteBodies.get(path);
+        if (rs) {
+          await writeScript(rootDir, rs);
+          result.pulled.push(path);
+          settled.add(path);
+        }
+        break;
+      }
+
+      case 'push':
+      case 'push-new':
+        pushPaths.push(path); // applied together in one bulk import below
+        break;
+
+      case 'delete-local':
+        if (options.allowDeletes) {
+          await deleteScript(rootDir, path);
+          removeBranchScript(local, branch, path);
+          result.deletedLocal.push(path);
+        }
+        break;
+
+      case 'delete-remote':
+        if (options.allowDeletes) {
+          const meta = remoteMeta.get(path);
+          if (meta) {
+            await deleteRemoteScript(ticket, meta.scriptId, meta.version, options);
+            removeBranchScript(local, branch, path);
+            result.deletedRemote.push(path);
+          }
+        }
+        break;
+
+      case 'conflict': {
+        const localS = localTree.get(path);
+        const remoteS = remoteBodies.get(path);
+        const meta = remoteMeta.get(path);
+        const baseRec = baseScripts[path];
+        // delete/modify conflict (one side gone) — can't auto-merge; leave for the developer.
+        if (!localS || !remoteS || !meta || !baseRec) {
+          result.conflicted.push(path);
+          break;
+        }
+        // Both sides changed to the same content → converged; settle base only.
+        if (normalizeBody(localS.body) === normalizeBody(remoteS.body)) {
+          result.converged.push(path);
+          settled.add(path);
+          break;
+        }
+        const baseContent = await getScriptVersionContent(
+          ticket, baseRec.scriptId ?? meta.scriptId, baseRec.version, options
+        );
+        const m = merge3(localS.body, baseContent.body, remoteS.body, {
+          local: 'local',
+          remote: `brainCloud v${meta.version}`,
+        });
+        if (m.conflict) {
+          // Write the conflict-marked file; do not push or settle — the developer resolves it.
+          await writeScript(rootDir, { path, body: m.merged, metadata: localS.metadata });
+          result.conflicted.push(path);
+        } else {
+          // Clean auto-merge: write locally and push version-locked to the remote we merged against.
+          await writeScript(rootDir, { path, body: m.merged, metadata: localS.metadata });
+          await updateRemoteScript(ticket, {
+            scriptId: meta.scriptId, version: meta.version, scriptName: meta.scriptName, content: m.merged,
+          }, options);
+          result.merged.push(path);
+          settled.add(path);
+        }
+        break;
+      }
+
+      default:
+        break;
+    }
+  }
+
+  // One bulk import for all plain pushes (addAndUpdateOnly never deletes).
+  if (pushPaths.length > 0) {
+    const zipScripts = pushPaths.map((p) => localTree.get(p)).filter((s): s is ZipScript => Boolean(s));
+    result.importSummary = await importScriptsZip(ticket, buildImportZip(zipScripts), 'addAndUpdateOnly', options);
+    result.pushed = pushPaths;
+    pushPaths.forEach((p) => settled.add(p));
+  }
+
+  // Settle base for everything now in sync, from a fresh remote listing + on-disk content.
+  if (settled.size > 0) {
+    const freshRemote = byPathRemote(await listRemoteScripts(ticket, options));
+    const freshTree = byPath(await readScriptTree(rootDir));
+    for (const path of settled) {
+      const meta = freshRemote.get(path);
+      const localS = freshTree.get(path);
+      if (meta && localS) {
+        upsertBranchScript(local, branch, path, {
+          scriptId: meta.scriptId,
+          version: meta.version,
+          sha256: computeSyncHash({ body: localS.body, metadata: localS.metadata ?? {} }),
+        });
+      }
+    }
+  }
+
+  touch(local, branch, options);
+  await writeLocalState(rootDir, local);
+  return result;
+}
+
 // --------------------------------------------------------------------------------------------
 // internals
 // --------------------------------------------------------------------------------------------
+
+function normalizeBody(body: string): string {
+  return body.replace(/\r\n/g, '\n').replace(/\s+$/, '');
+}
 
 async function localHashes(rootDir: string): Promise<Record<string, { hash: string }>> {
   const out: Record<string, { hash: string }> = {};

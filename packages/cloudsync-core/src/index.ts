@@ -18,6 +18,8 @@ export {
 
 export { computeSyncHash, canonicalString } from './hash';
 
+export { merge3, type Merge3Labels, type Merge3Result } from './merge';
+
 export {
   parseBcSync,
   serializeBcSync,

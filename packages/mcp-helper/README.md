@@ -18,10 +18,12 @@ the Node filesystem + MCP shell around it.
 | `status` | read | Dry-run: classify every script (in-sync / pull / push / conflict / new / delete). No writes. |
 | `pull` | read | Apply brainCloud → local for non-conflicting changes. Local deletes only with `allowDeletes`. |
 | `push` | write | Apply local → brainCloud for non-conflicting changes via one bulk import (`addAndUpdateOnly`). |
+| `sync` | write | Full two-way sync: pull + push + **3-way merge** for scripts changed on both sides (merge base recovered from brainCloud version history). Clean merges are applied + pushed; real conflicts get git-style `<<<<<<<` markers written locally and reported in `conflicted`. Deletes both ways only with `allowDeletes`. |
 
-All three take `rootDir` (the local sync folder), `ticket` (from `getSyncTicket`), and an optional
-`branch` (defaults to the current git branch from `.git/HEAD`). Conflicts and changes in the other
-direction are never auto-applied — they're reported in the result for the AI/developer to resolve.
+All take `rootDir` (the local sync folder), `ticket` (from `getSyncTicket`), and an optional
+`branch` (defaults to the current git branch from `.git/HEAD`). `pull`/`status` work with a `read`
+ticket; `push`/`sync` need a `write` ticket. In `pull`/`push`, conflicts and opposite-direction
+changes are never auto-applied — only `sync` reconciles both directions and merges.
 
 ## Configure as an MCP server
 

@@ -2,10 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import { currentBranch } from './state.js';
-import { pull, push, syncStatus, type SyncOptions } from './operations.js';
+import { pull, push, sync, syncStatus, type SyncOptions } from './operations.js';
 import type { SyncTicket } from './http.js';
 
-export const HELPER_VERSION = '0.1.0';
+export const HELPER_VERSION = '0.2.0-dev.0';
 
 /**
  * The sync ticket, as vended by the hosted braincloud-mcp's `getSyncTicket` tool. The helper
@@ -89,6 +89,36 @@ export function createServer(): McpServer {
     guard(async ({ rootDir, ticket, branch }) => {
       const resolvedBranch = await resolveBranch(rootDir, branch);
       const result = await push(rootDir, ticket as SyncTicket, resolvedBranch);
+      return { branch: resolvedBranch, ...result };
+    })
+  );
+
+  server.registerTool(
+    'sync',
+    {
+      title: 'Two-way sync cloud-code with brainCloud',
+      description:
+        'Full bidirectional sync for the branch: pulls non-conflicting remote changes, pushes ' +
+        'non-conflicting local changes, and 3-way-merges scripts changed on BOTH sides (using ' +
+        'brainCloud version history for the merge base). Cleanly-merged scripts are written locally ' +
+        'and pushed; genuine conflicts get git-style <<<<<<< markers written into the file and are ' +
+        'reported in "conflicted" for you to resolve, then re-run sync. Deletions (delete-local / ' +
+        'delete-remote) are applied only when allowDeletes=true. Requires a "write" ticket from ' +
+        'getSyncTicket (refused for a live-locked app).',
+      inputSchema: {
+        rootDir: rootDirField,
+        ticket: ticketSchema,
+        branch: branchField,
+        allowDeletes: z
+          .boolean()
+          .optional()
+          .describe('Apply deletions in both directions (default false).'),
+      },
+    },
+    guard(async ({ rootDir, ticket, branch, allowDeletes }) => {
+      const resolvedBranch = await resolveBranch(rootDir, branch);
+      const options: SyncOptions = { allowDeletes: allowDeletes ?? false };
+      const result = await sync(rootDir, ticket as SyncTicket, resolvedBranch, options);
       return { branch: resolvedBranch, ...result };
     })
   );

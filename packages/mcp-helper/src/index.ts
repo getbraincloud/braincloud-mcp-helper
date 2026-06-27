@@ -7,7 +7,16 @@
  * the exports below allow programmatic embedding and testing.
  */
 export { createServer, HELPER_VERSION } from './server.js';
-export { syncStatus, pull, push, type SyncOptions, type PullResult, type PushResult } from './operations.js';
+export {
+  syncStatus,
+  pull,
+  push,
+  sync,
+  type SyncOptions,
+  type PullResult,
+  type PushResult,
+  type SyncResult,
+} from './operations.js';
 export {
   listRemoteScripts,
   importScriptsZip,

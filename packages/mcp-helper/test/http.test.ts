@@ -5,6 +5,11 @@ import {
   importScriptsZip,
   exportScriptsZip,
   parseRemoteScripts,
+  getRemoteScript,
+  getScriptVersionContent,
+  updateRemoteScript,
+  deleteRemoteScript,
+  parseScriptObject,
   type SyncTicket,
 } from '../src/http';
 
@@ -82,6 +87,66 @@ describe('exportScriptsZip', () => {
     const fetch = vi.fn(async () => new Response(realZip, { status: 200 }));
     const bytes = await exportScriptsZip(TICKET, { fetch });
     expect(Object.keys(unzipSync(bytes))).toEqual(['a.ccjs']);
+  });
+});
+
+describe('parseScriptObject', () => {
+  it('extracts body/version/scriptName from a wrapped single-script response', () => {
+    const parsed = parseScriptObject(
+      { response: { script: { scriptId: 'i', scriptName: 'h', scriptFullPath: 'utils/h', version: 4, content: 'main();' } } },
+      'script',
+      'i'
+    );
+    expect(parsed).toEqual({ scriptId: 'i', scriptName: 'h', folderPath: 'utils', version: 4, body: 'main();' });
+  });
+
+  it('reads an archived version under scriptVersion', () => {
+    const parsed = parseScriptObject(
+      { response: { scriptVersion: { scriptName: 'h', version: 2, content: 'old();' } } },
+      'scriptVersion',
+      'i'
+    );
+    expect(parsed.body).toBe('old();');
+    expect(parsed.version).toBe(2);
+  });
+});
+
+describe('getRemoteScript / getScriptVersionContent', () => {
+  it('GETs a single script by id', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { script: { scriptId: 'i', scriptName: 'h', version: 5, content: 'x();' } } })
+    );
+    const r = await getRemoteScript(TICKET, 'i', { fetch });
+    expect(fetch).toHaveBeenCalledWith('https://host/builder/v1/team/T/app/A/script/i', expect.anything());
+    expect(r.body).toBe('x();');
+    expect(r.version).toBe(5);
+  });
+
+  it('GETs a specific archived version', async () => {
+    const fetch = vi.fn(async () =>
+      jsonResponse({ response: { scriptVersion: { scriptName: 'h', version: 3, content: 'base();' } } })
+    );
+    const r = await getScriptVersionContent(TICKET, 'i', 3, { fetch });
+    expect(fetch).toHaveBeenCalledWith('https://host/builder/v1/team/T/app/A/script/i/version/3', expect.anything());
+    expect(r.body).toBe('base();');
+  });
+});
+
+describe('updateRemoteScript / deleteRemoteScript', () => {
+  it('PATCHes with version lock, scriptName and content', async () => {
+    let init: RequestInit | undefined;
+    const fetch = vi.fn(async (_u: string, i?: RequestInit) => { init = i; return jsonResponse({ response: {} }); });
+    await updateRemoteScript(TICKET, { scriptId: 'i', version: 5, scriptName: 'h', content: 'merged();' }, { fetch });
+    expect(fetch).toHaveBeenCalledWith('https://host/builder/v1/team/T/app/A/script/i', expect.objectContaining({ method: 'PATCH' }));
+    expect(JSON.parse(init!.body as string)).toEqual({ version: 5, scriptName: 'h', content: 'merged();' });
+  });
+
+  it('DELETEs with a version body', async () => {
+    let init: RequestInit | undefined;
+    const fetch = vi.fn(async (_u: string, i?: RequestInit) => { init = i; return jsonResponse({ response: {} }); });
+    await deleteRemoteScript(TICKET, 'i', 7, { fetch });
+    expect(fetch).toHaveBeenCalledWith('https://host/builder/v1/team/T/app/A/script/i', expect.objectContaining({ method: 'DELETE' }));
+    expect(JSON.parse(init!.body as string)).toEqual({ version: 7 });
   });
 });
 

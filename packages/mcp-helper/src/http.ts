@@ -94,9 +94,112 @@ export async function exportScriptsZip(
   return new Uint8Array(await res.arrayBuffer());
 }
 
+/** A single remote script's current content + identity (for 3-way merge). */
+export interface RemoteScriptContent {
+  scriptId: string;
+  scriptName: string;
+  folderPath: string;
+  version: number;
+  body: string;
+}
+
+/** Fetch one script's current source + version by id (GET /script/{id}). */
+export async function getRemoteScript(
+  ticket: SyncTicket,
+  scriptId: string,
+  options: HttpOptions = {}
+): Promise<RemoteScriptContent> {
+  assertNotExpired(ticket);
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const res = await fetchFn(`${trimSlash(ticket.baseUrl)}/script/${encodeURIComponent(scriptId)}`, {
+    method: 'GET',
+    headers: { Authorization: ticket.authorization },
+  });
+  return parseScriptObject(await readJson(res, `GET /script/${scriptId}`), 'script', scriptId);
+}
+
+/** Fetch the source of a specific archived version (GET /script/{id}/version/{n}). Works for
+ *  deleted scripts too — the version archive is keyed by scriptId and is not gated on the live
+ *  script existing — so this recovers the BASE content for a delete/modify 3-way merge. */
+export async function getScriptVersionContent(
+  ticket: SyncTicket,
+  scriptId: string,
+  version: number,
+  options: HttpOptions = {}
+): Promise<RemoteScriptContent> {
+  assertNotExpired(ticket);
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const res = await fetchFn(
+    `${trimSlash(ticket.baseUrl)}/script/${encodeURIComponent(scriptId)}/version/${version}`,
+    { method: 'GET', headers: { Authorization: ticket.authorization } }
+  );
+  return parseScriptObject(await readJson(res, `GET /script/${scriptId}/version/${version}`),
+    'scriptVersion', scriptId);
+}
+
+/** Update one script's source with an optimistic version lock (PATCH /script/{id}). brainCloud
+ *  rejects the write if `version` no longer matches the live script, so a concurrent change can't
+ *  be silently lost — the caller re-fetches, re-merges and retries. */
+export async function updateRemoteScript(
+  ticket: SyncTicket,
+  params: { scriptId: string; version: number; scriptName: string; content: string },
+  options: HttpOptions = {}
+): Promise<unknown> {
+  assertNotExpired(ticket);
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const res = await fetchFn(`${trimSlash(ticket.baseUrl)}/script/${encodeURIComponent(params.scriptId)}`, {
+    method: 'PATCH',
+    headers: { Authorization: ticket.authorization, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      version: params.version,
+      scriptName: params.scriptName,
+      content: params.content,
+    }),
+  });
+  return readJson(res, `PATCH /script/${params.scriptId}`);
+}
+
+/** Delete one script remotely with a version lock (DELETE /script/{id}). */
+export async function deleteRemoteScript(
+  ticket: SyncTicket,
+  scriptId: string,
+  version: number,
+  options: HttpOptions = {}
+): Promise<unknown> {
+  assertNotExpired(ticket);
+  const fetchFn = options.fetch ?? globalThis.fetch;
+  const res = await fetchFn(`${trimSlash(ticket.baseUrl)}/script/${encodeURIComponent(scriptId)}`, {
+    method: 'DELETE',
+    headers: { Authorization: ticket.authorization, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ version }),
+  });
+  return readJson(res, `DELETE /script/${scriptId}`);
+}
+
 // --------------------------------------------------------------------------------------------
 // internals
 // --------------------------------------------------------------------------------------------
+
+/** Extract a script object (live or archived) from a Builder response into RemoteScriptContent. */
+export function parseScriptObject(body: unknown, key: string, scriptId: string): RemoteScriptContent {
+  const root = isObject(body) && isObject(body.response) ? body.response : body;
+  const obj = isObject(root) ? root[key] : undefined;
+  if (!isObject(obj)) {
+    throw new Error(`Builder response had no "${key}" object for script ${scriptId}.`);
+  }
+  const scriptName = String(obj.scriptName ?? '');
+  const version = typeof obj.version === 'number' ? obj.version : Number(obj.version);
+  const fullPath = typeof obj.scriptFullPath === 'string' ? obj.scriptFullPath : scriptName;
+  const path = fullPath.replace(/^\/+|\/+$/g, '');
+  const lastSlash = path.lastIndexOf('/');
+  return {
+    scriptId: String(obj.scriptId ?? scriptId),
+    scriptName,
+    folderPath: lastSlash === -1 ? '' : path.slice(0, lastSlash),
+    version: Number.isNaN(version) ? 0 : version,
+    body: typeof obj.content === 'string' ? obj.content : '',
+  };
+}
 
 export function parseRemoteScripts(body: unknown): RemoteScript[] {
   const root = isObject(body) && isObject(body.response) ? body.response : body;

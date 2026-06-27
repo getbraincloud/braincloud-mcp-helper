@@ -25,7 +25,8 @@
     "prepublishOnly": "npm run clean && npm run build"
   },
   "dependencies": {
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "node-diff3": "^3.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",
