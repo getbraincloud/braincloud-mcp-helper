@@ -52,3 +52,11 @@ npm publish -w @braincloud/mcp-helper     --access public --tag dev
 
 > Keeping the two package versions in lockstep is manual for now; consider
 > [changesets](https://github.com/changesets/changesets) if release volume grows.
+
+## Internal dependency is pinned exact
+
+`@braincloud/mcp-helper` pins `@braincloud/cloudsync-core` to the **exact** version
+being released (not a `^` range), because a `^0.1.0` range does NOT match a prerelease
+like `0.1.0-dev.0` — the `@dev` helper would fail to resolve core. So on every release,
+bump **three** spots in lockstep: both `version` fields **and** the helper's
+`dependencies["@braincloud/cloudsync-core"]`.
