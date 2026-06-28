@@ -1,6 +1,6 @@
 {
   "name": "@braincloud/cloudsync-core",
-  "version": "0.2.0",
+  "version": "0.3.0-dev.0",
   "description": "Shared on-disk format and sync logic for brainCloud cloud-code: .bcsync / .ccjs parsing, metadata comment block, change-detection hashing, sync-state classification, and zip build/expand. Host-agnostic (no vscode or MCP deps).",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
