@@ -13,6 +13,7 @@ import {
 } from '@braincloud/cloudsync-core';
 import { readScriptTree, writeScript, deleteScript } from './fs-tree.js';
 import {
+  appIdFromBaseUrl,
   deleteRemoteScript,
   exportScriptsZip,
   getScriptVersionContent,
@@ -23,7 +24,13 @@ import {
   type RemoteScript,
   type SyncTicket,
 } from './http.js';
-import { readLocalState, writeLocalState } from './state.js';
+import {
+  ensureGitignore,
+  readConfig,
+  readLocalState,
+  writeConfig,
+  writeLocalState,
+} from './state.js';
 
 export interface SyncOptions extends HttpOptions {
   /** Apply deletions (delete-local on pull). Off by default — deletes always need opt-in. */
@@ -54,6 +61,7 @@ export async function syncStatus(
   branch: string,
   options: SyncOptions = {}
 ): Promise<ScriptStatus[]> {
+  await assertAppMatches(rootDir, branch, ticket);
   const local = await localHashes(rootDir);
   const base = (await readLocalState(rootDir))[branch]?.scripts ?? {};
   const remote = remoteVersionMap(await listRemoteScripts(ticket, options));
@@ -71,6 +79,7 @@ export async function pull(
   options: SyncOptions = {}
 ): Promise<PullResult> {
   const plan = await syncStatus(rootDir, ticket, branch, options);
+  await recordBranchMapping(rootDir, branch, ticket);
   const toPull = new Set(plan.filter((p) => p.action === 'pull' || p.action === 'pull-new').map((p) => p.path));
   const toDelete = new Set(
     options.allowDeletes ? plan.filter((p) => p.action === 'delete-local').map((p) => p.path) : []
@@ -123,6 +132,7 @@ export async function push(
   options: SyncOptions = {}
 ): Promise<PushResult> {
   const plan = await syncStatus(rootDir, ticket, branch, options);
+  await recordBranchMapping(rootDir, branch, ticket);
   const toPush = plan.filter((p) => p.action === 'push' || p.action === 'push-new').map((p) => p.path);
   if (toPush.length === 0) {
     return { pushed: [], importSummary: null, skipped: plan };
@@ -189,6 +199,7 @@ export async function sync(
   options: SyncOptions = {}
 ): Promise<SyncResult> {
   const plan = await syncStatus(rootDir, ticket, branch, options);
+  await recordBranchMapping(rootDir, branch, ticket);
   const remoteMeta = byPathRemote(await listRemoteScripts(ticket, options));
   const localTree = byPath(await readScriptTree(rootDir));
   const local = await readLocalState(rootDir);
@@ -364,4 +375,63 @@ function versionFromMeta(script: ZipScript): number {
 
 function touch(local: BcSyncLocal, branch: string, options: SyncOptions): void {
   getOrCreateBranchState(local, branch).lastSynced = options.now ?? new Date().toISOString();
+}
+
+/**
+ * Guard: refuse to sync if the committed `.bcsync` already binds this branch to a *different* app
+ * than the ticket targets. Stops a stray ticket from pulling/pushing the wrong app into a folder.
+ * No-op when `.bcsync` is absent, has no mapping for the branch, or the ticket's app can't be
+ * derived — the ticket remains the source of truth in those cases.
+ */
+async function assertAppMatches(rootDir: string, branch: string, ticket: SyncTicket): Promise<void> {
+  const appId = appIdFromBaseUrl(ticket.baseUrl);
+  if (!appId) {
+    return;
+  }
+  const existing = (await readConfig(rootDir))?.branchMappings[branch];
+  if (existing && existing.appId !== appId) {
+    throw appMismatchError(branch, existing.appId, existing.appName, appId, ticket.appName);
+  }
+}
+
+/**
+ * Record this branch → app mapping in the committed `.bcsync` (creating the file if needed) and
+ * ensure `.bcsync.local` is gitignored. `.bcsync` is the team-shared, committable record of which
+ * brainCloud app a branch targets — the VS Code extension and a teammate's checkout both resolve
+ * the app from it, so a folder the helper seeds must carry it. Idempotent: only writes when the
+ * mapping is new or its appName changed, avoiding spurious diffs on every sync.
+ */
+async function recordBranchMapping(rootDir: string, branch: string, ticket: SyncTicket): Promise<void> {
+  const appId = appIdFromBaseUrl(ticket.baseUrl);
+  if (!appId) {
+    return;
+  }
+  const config = (await readConfig(rootDir)) ?? { branchMappings: {} };
+  const existing = config.branchMappings[branch];
+  if (existing && existing.appId !== appId) {
+    throw appMismatchError(branch, existing.appId, existing.appName, appId, ticket.appName);
+  }
+  if (!existing || existing.appName !== ticket.appName) {
+    config.branchMappings[branch] = {
+      appId,
+      ...(ticket.appName ? { appName: ticket.appName } : {}),
+    };
+    await writeConfig(rootDir, config);
+  }
+  await ensureGitignore(rootDir);
+}
+
+function appMismatchError(
+  branch: string,
+  mappedAppId: string,
+  mappedAppName: string | undefined,
+  ticketAppId: string,
+  ticketAppName: string
+): Error {
+  const mapped = mappedAppName ? `${mappedAppName} (${mappedAppId})` : mappedAppId;
+  const ticketApp = ticketAppName ? `${ticketAppName} (${ticketAppId})` : ticketAppId;
+  return new Error(
+    `.bcsync binds branch "${branch}" to app ${mapped}, but the sync ticket is for app ${ticketApp}. ` +
+      `Refusing to sync — use a ticket for ${mapped}, or fix the branch mapping in .bcsync.`
+  );
 }

@@ -18,6 +18,17 @@ export interface SyncTicket {
   expiresAt?: string;
 }
 
+/**
+ * The brainCloud app id a ticket targets, parsed from the `/app/<appId>` segment of its base URL
+ * (e.g. `https://host/builder/v1/team/<teamId>/app/55926` → `"55926"`). Returns `undefined` for a
+ * non-standard base URL with no `/app/` segment. Used to record / guard the `.bcsync` branch→app
+ * mapping — the ticket is the live source of which app a folder is bound to.
+ */
+export function appIdFromBaseUrl(baseUrl: string): string | undefined {
+  const m = baseUrl.match(/\/app\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]!) : undefined;
+}
+
 /** Bulk-import collision modes (Builder `BuilderImportMode`). */
 export type ImportMode = 'addOnlyIgnoreDups' | 'addOnly' | 'addAndUpdateOnly' | 'fullSync';
 

@@ -4,7 +4,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { buildImportZip, expandExportZip, type ZipScript } from '@braincloud/cloudsync-core';
 import { writeScript, readScriptTree, deleteScript } from '../src/fs-tree';
-import { readLocalState } from '../src/state';
+import { readConfig, readLocalState, writeConfig } from '../src/state';
 import { syncStatus, pull, push, sync } from '../src/operations';
 import type { FetchLike, SyncTicket } from '../src/http';
 
@@ -202,6 +202,46 @@ describe('push', () => {
 
     expect(second.pushed).toEqual([]);
     expect(builder.imports).toHaveLength(1); // only the first push uploaded
+  });
+});
+
+describe('.bcsync branch mapping', () => {
+  it('pull records the branch → app mapping and gitignores local state', async () => {
+    const { fetch } = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, BRANCH, { fetch, now: NOW });
+
+    const config = await readConfig(root);
+    expect(config!.branchMappings[BRANCH]).toEqual({ appId: 'A', appName: 'MyApp' });
+
+    const gitignore = await fs.readFile(path.join(root, '.gitignore'), 'utf8');
+    expect(gitignore.split(/\r?\n/)).toContain('.bcsync.local');
+  });
+
+  it('push records the mapping even when there is nothing to push from an empty tree', async () => {
+    // No local scripts → nothing to push, but the folder should still be bound to the app.
+    await push(root, TICKET, BRANCH, { fetch: fakeBuilder().fetch, now: NOW });
+    const config = await readConfig(root);
+    expect(config!.branchMappings[BRANCH]).toEqual({ appId: 'A', appName: 'MyApp' });
+  });
+
+  it('preserves unrelated .bcsync fields on a subsequent sync', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, BRANCH, { fetch: b.fetch, now: NOW });
+    // A teammate / VS Code may set extra config; a re-pull must not clobber it.
+    await writeConfig(root, { ...(await readConfig(root))!, relativeFolder: 'cloud-code' });
+    await pull(root, TICKET, BRANCH, { fetch: b.fetch, now: NOW });
+
+    const after = await readConfig(root);
+    expect(after!.branchMappings[BRANCH]).toEqual({ appId: 'A', appName: 'MyApp' });
+    expect(after!.relativeFolder).toBe('cloud-code');
+  });
+
+  it('refuses to sync when .bcsync binds the branch to a different app', async () => {
+    await writeConfig(root, { branchMappings: { [BRANCH]: { appId: 'B', appName: 'Other' } } });
+    const { fetch } = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+
+    await expect(pull(root, TICKET, BRANCH, { fetch, now: NOW })).rejects.toThrow(/Other \(B\)/);
+    await expect(syncStatus(root, TICKET, BRANCH, { fetch })).rejects.toThrow(/Refusing to sync/);
   });
 });
 

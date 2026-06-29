@@ -33,6 +33,21 @@ export async function writeLocalState(rootDir: string, local: BcSyncLocal): Prom
 }
 
 /**
+ * Ensure the sync folder's `.gitignore` lists `.bcsync.local`, so the per-machine sync state is
+ * never committed. Idempotent: appends the entry only if absent, preserving any existing content.
+ */
+export async function ensureGitignore(rootDir: string): Promise<void> {
+  const file = path.join(rootDir, '.gitignore');
+  const existing = (await readFileOpt(file)) ?? '';
+  const present = new Set(existing.split(/\r?\n/).map((line) => line.trim()));
+  if (present.has(BCSYNC_LOCAL)) {
+    return;
+  }
+  const sep = existing.length === 0 || existing.endsWith('\n') ? '' : '\n';
+  await fs.writeFile(file, `${existing}${sep}${BCSYNC_LOCAL}\n`, 'utf8');
+}
+
+/**
  * Resolve the current git branch by reading `.git/HEAD` (no git binary needed). Walks up from
  * `startDir` to find the repo. Returns `undefined` if not in a repo or in detached-HEAD state.
  */
