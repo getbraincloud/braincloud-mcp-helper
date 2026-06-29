@@ -1,11 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { currentBranch } from './state.js';
+import { currentBranch, resolveSyncRoot } from './state.js';
 import { pull, push, sync, syncStatus, type SyncOptions } from './operations.js';
 import type { SyncTicket } from './http.js';
 
-export const HELPER_VERSION = '0.2.0-dev.0';
+export const HELPER_VERSION = '0.3.0-dev.1';
 
 /**
  * The sync ticket, as vended by the hosted braincloud-mcp's `getSyncTicket` tool. The helper
@@ -22,11 +22,35 @@ const ticketSchema = z
 
 const rootDirField = z
   .string()
-  .describe('Absolute path to the local cloud-code sync folder (the .ccjs tree + .bcsync).');
+  .optional()
+  .describe(
+    'Absolute path to the local cloud-code sync folder (the .ccjs tree + .bcsync). Optional: if ' +
+      'omitted, the helper discovers the nearest .bcsync folder at or above its working directory. ' +
+      'Pass it explicitly for a brand-new folder, before its first sync.'
+  );
 const branchField = z
   .string()
   .optional()
-  .describe('Git branch to sync. Defaults to the current branch resolved from .git/HEAD.');
+  .describe(
+    'Git branch to sync. Defaults to the current branch from .git/HEAD; if the folder is not a ' +
+      'git repo, a reserved no-branch key is used and can later be adopted onto a real branch.'
+  );
+const adoptNoGitBranchField = z
+  .boolean()
+  .optional()
+  .describe(
+    'Confirm moving the no-git sync state and app mapping onto the current git branch (dropping ' +
+      'the no-branch entry). Needed once, when a folder first synced without git is now on a real ' +
+      'branch; the tool asks for it rather than orphaning the prior state.'
+  );
+const confirmAppNameField = z
+  .string()
+  .optional()
+  .describe(
+    "Safety confirmation. Only needed for a previously-synced folder that has no committed " +
+      ".bcsync app mapping (e.g. synced by an older helper): set this to the ticket's appName to " +
+      "confirm you intend to sync this folder with that app. Once .bcsync exists it is not needed."
+  );
 
 /** Build the configured helper MCP server (transport-agnostic; the CLI attaches stdio). */
 export function createServer(): McpServer {
@@ -40,12 +64,22 @@ export function createServer(): McpServer {
         'Dry-run: classify every cloud-code script for the branch (in-sync / pull / push / ' +
         'conflict / pull-new / push-new / delete-local / delete-remote). Always safe — no writes. ' +
         'Use a "read" ticket from getSyncTicket.',
-      inputSchema: { rootDir: rootDirField, ticket: ticketSchema, branch: branchField },
+      inputSchema: {
+        rootDir: rootDirField,
+        ticket: ticketSchema,
+        branch: branchField,
+        confirmAppName: confirmAppNameField,
+        adoptNoGitBranch: adoptNoGitBranchField,
+      },
     },
-    guard(async ({ rootDir, ticket, branch }) => {
-      const resolvedBranch = await resolveBranch(rootDir, branch);
-      const plan = await syncStatus(rootDir, ticket as SyncTicket, resolvedBranch);
-      return { branch: resolvedBranch, plan };
+    guard(async ({ rootDir, ticket, branch, confirmAppName, adoptNoGitBranch }) => {
+      const root = await resolveSyncRoot(rootDir);
+      const resolvedBranch = await resolveBranch(root, branch);
+      const plan = await syncStatus(root, ticket as SyncTicket, resolvedBranch, {
+        confirmAppName,
+        adoptNoGitBranch,
+      });
+      return { rootDir: root, branch: resolvedBranch, plan };
     })
   );
 
@@ -61,17 +95,20 @@ export function createServer(): McpServer {
         rootDir: rootDirField,
         ticket: ticketSchema,
         branch: branchField,
+        confirmAppName: confirmAppNameField,
+        adoptNoGitBranch: adoptNoGitBranchField,
         allowDeletes: z
           .boolean()
           .optional()
           .describe('Delete local files for scripts removed on brainCloud (default false).'),
       },
     },
-    guard(async ({ rootDir, ticket, branch, allowDeletes }) => {
-      const resolvedBranch = await resolveBranch(rootDir, branch);
-      const options: SyncOptions = { allowDeletes: allowDeletes ?? false };
-      const result = await pull(rootDir, ticket as SyncTicket, resolvedBranch, options);
-      return { branch: resolvedBranch, ...result };
+    guard(async ({ rootDir, ticket, branch, allowDeletes, confirmAppName, adoptNoGitBranch }) => {
+      const root = await resolveSyncRoot(rootDir);
+      const resolvedBranch = await resolveBranch(root, branch);
+      const options: SyncOptions = { allowDeletes: allowDeletes ?? false, confirmAppName, adoptNoGitBranch };
+      const result = await pull(root, ticket as SyncTicket, resolvedBranch, options);
+      return { rootDir: root, branch: resolvedBranch, ...result };
     })
   );
 
@@ -84,12 +121,19 @@ export function createServer(): McpServer {
         'import (mode addAndUpdateOnly — never deletes). Conflicts and remote-only changes are left ' +
         'untouched and reported in "skipped". Requires a "write" ticket from getSyncTicket (the ' +
         'hosted MCP refuses a write ticket for a live-locked app).',
-      inputSchema: { rootDir: rootDirField, ticket: ticketSchema, branch: branchField },
+      inputSchema: {
+        rootDir: rootDirField,
+        ticket: ticketSchema,
+        branch: branchField,
+        confirmAppName: confirmAppNameField,
+        adoptNoGitBranch: adoptNoGitBranchField,
+      },
     },
-    guard(async ({ rootDir, ticket, branch }) => {
-      const resolvedBranch = await resolveBranch(rootDir, branch);
-      const result = await push(rootDir, ticket as SyncTicket, resolvedBranch);
-      return { branch: resolvedBranch, ...result };
+    guard(async ({ rootDir, ticket, branch, confirmAppName, adoptNoGitBranch }) => {
+      const root = await resolveSyncRoot(rootDir);
+      const resolvedBranch = await resolveBranch(root, branch);
+      const result = await push(root, ticket as SyncTicket, resolvedBranch, { confirmAppName, adoptNoGitBranch });
+      return { rootDir: root, branch: resolvedBranch, ...result };
     })
   );
 
@@ -109,17 +153,20 @@ export function createServer(): McpServer {
         rootDir: rootDirField,
         ticket: ticketSchema,
         branch: branchField,
+        confirmAppName: confirmAppNameField,
+        adoptNoGitBranch: adoptNoGitBranchField,
         allowDeletes: z
           .boolean()
           .optional()
           .describe('Apply deletions in both directions (default false).'),
       },
     },
-    guard(async ({ rootDir, ticket, branch, allowDeletes }) => {
-      const resolvedBranch = await resolveBranch(rootDir, branch);
-      const options: SyncOptions = { allowDeletes: allowDeletes ?? false };
-      const result = await sync(rootDir, ticket as SyncTicket, resolvedBranch, options);
-      return { branch: resolvedBranch, ...result };
+    guard(async ({ rootDir, ticket, branch, allowDeletes, confirmAppName, adoptNoGitBranch }) => {
+      const root = await resolveSyncRoot(rootDir);
+      const resolvedBranch = await resolveBranch(root, branch);
+      const options: SyncOptions = { allowDeletes: allowDeletes ?? false, confirmAppName, adoptNoGitBranch };
+      const result = await sync(root, ticket as SyncTicket, resolvedBranch, options);
+      return { rootDir: root, branch: resolvedBranch, ...result };
     })
   );
 
@@ -134,13 +181,10 @@ async function resolveBranch(rootDir: string, provided?: string): Promise<string
   if (provided && provided.trim()) {
     return provided.trim();
   }
-  const branch = await currentBranch(rootDir);
-  if (!branch) {
-    throw new Error(
-      'Could not determine the git branch (detached HEAD or not a git repo). Pass "branch" explicitly.'
-    );
-  }
-  return branch;
+  // No explicit branch: use the git branch if there is one, else the reserved no-git ("") key.
+  // "" can never be a real branch name, so it never collides; it can later be adopted onto a
+  // real branch (see maybeMigrateNoGit) once the folder becomes a git repo.
+  return (await currentBranch(rootDir)) ?? '';
 }
 
 /** Wrap a handler so its return value is serialised, and errors become an MCP error result. */

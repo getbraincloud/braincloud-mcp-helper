@@ -48,6 +48,48 @@ export async function ensureGitignore(rootDir: string): Promise<void> {
 }
 
 /**
+ * Resolve the sync folder for an operation. An explicit `rootDir` always wins (resolved to an
+ * absolute path). Otherwise the folder is discovered by walking up from `startDir` (default the
+ * helper's working directory) to the nearest folder holding a `.bcsync` / `.bcsync.local` — the
+ * same "find the repo root" pattern git uses — so a client launched inside a synced folder need
+ * not repeat the path. Throws an actionable error when neither is available (e.g. a brand-new
+ * folder, before its first sync, which has no `.bcsync` yet).
+ */
+export async function resolveSyncRoot(rootDir?: string, startDir: string = process.cwd()): Promise<string> {
+  if (rootDir && rootDir.trim()) {
+    return path.resolve(rootDir.trim());
+  }
+  const found = await findSyncRoot(startDir);
+  if (found) {
+    return found;
+  }
+  throw new Error(
+    `No rootDir given and no .bcsync sync folder found at or above ${path.resolve(startDir)}. ` +
+      `Pass rootDir (an absolute path to the sync folder), or run the client from inside a synced ` +
+      `folder. A brand-new folder has no .bcsync until its first sync — pass rootDir that first time.`
+  );
+}
+
+/** Walk up from `startDir` to the nearest folder containing `.bcsync` or `.bcsync.local`. */
+async function findSyncRoot(startDir: string): Promise<string | undefined> {
+  let current = path.resolve(startDir);
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    if (
+      (await statOpt(path.join(current, BCSYNC)))?.isFile() ||
+      (await statOpt(path.join(current, BCSYNC_LOCAL)))?.isFile()
+    ) {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    current = parent;
+  }
+}
+
+/**
  * Resolve the current git branch by reading `.git/HEAD` (no git binary needed). Walks up from
  * `startDir` to find the repo. Returns `undefined` if not in a repo or in detached-HEAD state.
  */

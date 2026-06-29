@@ -243,6 +243,73 @@ describe('.bcsync branch mapping', () => {
     await expect(pull(root, TICKET, BRANCH, { fetch, now: NOW })).rejects.toThrow(/Other \(B\)/);
     await expect(syncStatus(root, TICKET, BRANCH, { fetch })).rejects.toThrow(/Refusing to sync/);
   });
+
+  it('does NOT gate a brand-new folder with no local history', async () => {
+    // Empty folder, no .bcsync, no .bcsync.local → first-time binding, no confirmation needed.
+    const { fetch } = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    const plan = await syncStatus(root, TICKET, BRANCH, { fetch });
+    expect(plan.find((p) => p.path === 's')!.action).toBe('pull-new');
+  });
+
+  it('forces confirmation for a previously-synced folder with no .bcsync mapping', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, BRANCH, { fetch: b.fetch, now: NOW }); // writes .bcsync + .bcsync.local
+    await fs.rm(path.join(root, '.bcsync')); // simulate a pre-mapping (legacy) folder
+
+    // No confirmation → refuse (the app can't be verified).
+    await expect(syncStatus(root, TICKET, BRANCH, { fetch: b.fetch }))
+      .rejects.toThrow(/cannot be verified|confirmAppName/);
+    // Wrong confirmation → still refuse.
+    await expect(syncStatus(root, TICKET, BRANCH, { fetch: b.fetch, confirmAppName: 'WrongApp' }))
+      .rejects.toThrow(/cannot be verified|confirmAppName/);
+
+    // Correct confirmation (== ticket appName) → proceeds, and a confirmed pull re-establishes .bcsync.
+    const ok = await syncStatus(root, TICKET, BRANCH, { fetch: b.fetch, confirmAppName: 'MyApp' });
+    expect(ok.find((p) => p.path === 's')!.action).toBe('in-sync');
+
+    await pull(root, TICKET, BRANCH, { fetch: b.fetch, now: NOW, confirmAppName: 'MyApp' });
+    expect((await readConfig(root))!.branchMappings[BRANCH]).toEqual({ appId: 'A', appName: 'MyApp' });
+  });
+});
+
+describe('no-git ("" branch key) and adoption', () => {
+  it('syncs under the "" key when there is no git branch', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, '', { fetch: b.fetch, now: NOW });
+
+    expect((await readConfig(root))!.branchMappings['']).toEqual({ appId: 'A', appName: 'MyApp' });
+    expect((await readLocalState(root))['']!.scripts.s).toBeDefined();
+  });
+
+  it('does not prompt for a brand-new branch when there is no "" state', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    const plan = await syncStatus(root, TICKET, 'main', { fetch: b.fetch });
+    expect(plan.find((p) => p.path === 's')!.action).toBe('pull-new');
+  });
+
+  it('prompts to adopt the "" state onto a real branch, then migrates and drops ""', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, '', { fetch: b.fetch, now: NOW }); // first sync, no git → "" key
+
+    // Now "on branch main": main has no state, "" does → refuse until adoption is confirmed.
+    await expect(syncStatus(root, TICKET, 'main', { fetch: b.fetch }))
+      .rejects.toThrow(/adoptNoGitBranch/);
+
+    // Adopt: "" state + mapping move to main, "" is dropped.
+    await pull(root, TICKET, 'main', { fetch: b.fetch, now: NOW, adoptNoGitBranch: true });
+
+    const cfg = await readConfig(root);
+    expect(cfg!.branchMappings['']).toBeUndefined();
+    expect(cfg!.branchMappings['main']).toEqual({ appId: 'A', appName: 'MyApp' });
+
+    const local = await readLocalState(root);
+    expect(local['']).toBeUndefined();
+    expect(local['main']!.scripts.s).toBeDefined();
+
+    // Adopted base means a follow-up status on main is clean.
+    const plan = await syncStatus(root, TICKET, 'main', { fetch: b.fetch });
+    expect(plan.find((p) => p.path === 's')!.action).toBe('in-sync');
+  });
 });
 
 describe('sync', () => {

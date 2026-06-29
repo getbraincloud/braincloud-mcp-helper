@@ -37,6 +37,18 @@ export interface SyncOptions extends HttpOptions {
   allowDeletes?: boolean;
   /** Override the lastSynced timestamp (for deterministic tests). */
   now?: string;
+  /**
+   * Confirms the target app for a previously-synced folder that has no committed `.bcsync`
+   * mapping to verify against (e.g. one synced by a pre-mapping helper). Must equal the ticket's
+   * appName to proceed; otherwise the op refuses rather than risk syncing the wrong app.
+   */
+  confirmAppName?: string;
+  /**
+   * Confirms moving the no-git (`""`) sync state and app mapping onto the current git branch
+   * (and dropping the `""` entry). Required when a folder was first synced without git and a real
+   * branch has since appeared; without it the op refuses rather than orphan the prior state.
+   */
+  adoptNoGitBranch?: boolean;
 }
 
 export interface PullResult {
@@ -61,7 +73,8 @@ export async function syncStatus(
   branch: string,
   options: SyncOptions = {}
 ): Promise<ScriptStatus[]> {
-  await assertAppMatches(rootDir, branch, ticket);
+  await maybeMigrateNoGit(rootDir, branch, options);
+  await assertAppGuard(rootDir, branch, ticket, options);
   const local = await localHashes(rootDir);
   const base = (await readLocalState(rootDir))[branch]?.scripts ?? {};
   const remote = remoteVersionMap(await listRemoteScripts(ticket, options));
@@ -378,19 +391,41 @@ function touch(local: BcSyncLocal, branch: string, options: SyncOptions): void {
 }
 
 /**
- * Guard: refuse to sync if the committed `.bcsync` already binds this branch to a *different* app
- * than the ticket targets. Stops a stray ticket from pulling/pushing the wrong app into a folder.
- * No-op when `.bcsync` is absent, has no mapping for the branch, or the ticket's app can't be
- * derived — the ticket remains the source of truth in those cases.
+ * Guard run before every op: ensure the ticket's app is the right one for this folder/branch.
+ *
+ *  - Committed `.bcsync` maps the branch to a *different* app than the ticket → refuse (the stray-
+ *    ticket guard).
+ *  - Committed `.bcsync` maps the branch to the ticket's app → verified, proceed.
+ *  - No committed mapping but the folder has local sync history for the branch (e.g. synced by a
+ *    pre-mapping helper) → the app cannot be verified, so refuse UNTIL the caller confirms it by
+ *    passing confirmAppName equal to the ticket's appName. A confirmed op then re-establishes
+ *    `.bcsync` (via recordBranchMapping), so the confirmation is a one-time, self-healing step.
+ *  - No committed mapping and no local history → a brand-new folder/branch; the ticket is the
+ *    source of truth for the first-time binding, no confirmation needed.
+ *
+ * No-op when the ticket's app id can't be derived from its base URL.
  */
-async function assertAppMatches(rootDir: string, branch: string, ticket: SyncTicket): Promise<void> {
+async function assertAppGuard(
+  rootDir: string,
+  branch: string,
+  ticket: SyncTicket,
+  options: SyncOptions
+): Promise<void> {
   const appId = appIdFromBaseUrl(ticket.baseUrl);
   if (!appId) {
     return;
   }
   const existing = (await readConfig(rootDir))?.branchMappings[branch];
-  if (existing && existing.appId !== appId) {
-    throw appMismatchError(branch, existing.appId, existing.appName, appId, ticket.appName);
+  if (existing) {
+    if (existing.appId !== appId) {
+      throw appMismatchError(branch, existing.appId, existing.appName, appId, ticket.appName);
+    }
+    return;
+  }
+  const base = (await readLocalState(rootDir))[branch]?.scripts ?? {};
+  const previouslySynced = Object.keys(base).length > 0;
+  if (previouslySynced && options.confirmAppName !== ticket.appName) {
+    throw unverifiedAppError(branch, appId, ticket.appName);
   }
 }
 
@@ -433,5 +468,69 @@ function appMismatchError(
   return new Error(
     `.bcsync binds branch "${branch}" to app ${mapped}, but the sync ticket is for app ${ticketApp}. ` +
       `Refusing to sync — use a ticket for ${mapped}, or fix the branch mapping in .bcsync.`
+  );
+}
+
+/**
+ * Handle the no-git → git transition. A folder first synced without a git repo tracks its state
+ * under the reserved `""` key (an empty string can never be a real git branch name, so it never
+ * collides). When a real branch later appears and has no state of its own, but `""` state exists,
+ * the op refuses until the caller confirms with adoptNoGitBranch=true — then the `""` mapping and
+ * base state are moved onto the branch and the `""` entry dropped. Composes with assertAppGuard:
+ * after adoption the branch carries the old `""` app, so a mismatched ticket is still caught.
+ *
+ * No-op when: branch is the `""` key itself; the branch already has state; or there is no `""`
+ * state to adopt (a genuinely brand-new branch — the normal first-time-binding case).
+ */
+async function maybeMigrateNoGit(rootDir: string, branch: string, options: SyncOptions): Promise<void> {
+  if (!branch) {
+    return;
+  }
+  const config = (await readConfig(rootDir)) ?? { branchMappings: {} };
+  const local = await readLocalState(rootDir);
+  const branchEstablished =
+    config.branchMappings[branch] !== undefined ||
+    Object.keys(local[branch]?.scripts ?? {}).length > 0;
+  if (branchEstablished) {
+    return;
+  }
+  const noGitMapping = config.branchMappings[''];
+  const noGitState = local[''];
+  const hasNoGitState = noGitMapping !== undefined || Object.keys(noGitState?.scripts ?? {}).length > 0;
+  if (!hasNoGitState) {
+    return;
+  }
+  if (options.adoptNoGitBranch !== true) {
+    throw migrateNoGitPrompt(branch, noGitMapping?.appId, noGitMapping?.appName);
+  }
+  if (noGitMapping !== undefined) {
+    config.branchMappings[branch] = noGitMapping;
+    delete config.branchMappings[''];
+    await writeConfig(rootDir, config);
+  }
+  if (noGitState !== undefined) {
+    local[branch] = noGitState;
+    delete local[''];
+    await writeLocalState(rootDir, local);
+  }
+}
+
+function migrateNoGitPrompt(branch: string, appId?: string, appName?: string): Error {
+  const app = appId ? (appName ? `${appName} (${appId})` : appId) : 'an app';
+  return new Error(
+    `This folder was synced without git (under the no-branch key) for ${app}, and you are now on ` +
+      `git branch "${branch}". Re-run with adoptNoGitBranch=true to move that sync state and app ` +
+      `mapping onto "${branch}" and drop the no-git entry. To keep them separate, or to use a ` +
+      `different app for this branch, pass branch explicitly instead.`
+  );
+}
+
+function unverifiedAppError(branch: string, ticketAppId: string, ticketAppName: string): Error {
+  const app = ticketAppName ? `${ticketAppName} (${ticketAppId})` : ticketAppId;
+  return new Error(
+    `This folder has local sync history for branch "${branch}" but no committed .bcsync app mapping, ` +
+      `so the target app cannot be verified (it may have been synced by an older helper). The ticket ` +
+      `is for app ${app}. If that is the correct app for this folder, re-run with ` +
+      `confirmAppName="${ticketAppName}" to confirm; otherwise use a ticket for the right app.`
   );
 }

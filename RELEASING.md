@@ -58,5 +58,12 @@ npm publish -w @braincloud/mcp-helper     --access public --tag dev
 `@braincloud/mcp-helper` pins `@braincloud/cloudsync-core` to the **exact** version
 being released (not a `^` range), because a `^0.1.0` range does NOT match a prerelease
 like `0.1.0-dev.0` — the `@dev` helper would fail to resolve core. So on every release,
-bump **three** spots in lockstep: both `version` fields **and** the helper's
-`dependencies["@braincloud/cloudsync-core"]`.
+bump **four** spots in lockstep:
+
+1. `packages/cloudsync-core/package.json` → `version`
+2. `packages/mcp-helper/package.json` → `version`
+3. `packages/mcp-helper/package.json` → `dependencies["@braincloud/cloudsync-core"]` (exact)
+4. `packages/mcp-helper/src/server.ts` → `HELPER_VERSION` (reported in the MCP `initialize`
+   handshake and used for the hosted MCP's compatibility check — keep it equal to the package version)
+
+Then run `npm install` so `package-lock.json` matches (the publish workflow's `npm ci` requires it).
