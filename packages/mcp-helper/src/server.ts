@@ -5,7 +5,7 @@ import { currentBranch, resolveSyncRoot, NO_GIT_BRANCH } from './state.js';
 import { pull, push, sync, syncStatus, type SyncOptions } from './operations.js';
 import type { SyncTicket } from './http.js';
 
-export const HELPER_VERSION = '0.3.0-dev.3';
+export const HELPER_VERSION = '0.3.0';
 
 /**
  * The sync ticket, as vended by the hosted braincloud-mcp's `getSyncTicket` tool. The helper
