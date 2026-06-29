@@ -272,38 +272,42 @@ describe('.bcsync branch mapping', () => {
   });
 });
 
-describe('no-git ("" branch key) and adoption', () => {
-  it('syncs under the "" key when there is no git branch', async () => {
-    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
-    await pull(root, TICKET, '', { fetch: b.fetch, now: NOW });
+describe('no-git (__default__ branch key) and adoption', () => {
+  // The literal "__default__" is the cross-tool contract shared with the VS Code extension —
+  // assert it directly so an accidental change to NO_GIT_BRANCH breaks this test.
+  const NO_GIT = '__default__';
 
-    expect((await readConfig(root))!.branchMappings['']).toEqual({ appId: 'A', appName: 'MyApp' });
-    expect((await readLocalState(root))['']!.scripts.s).toBeDefined();
+  it('syncs under the __default__ key when there is no git branch', async () => {
+    const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
+    await pull(root, TICKET, NO_GIT, { fetch: b.fetch, now: NOW });
+
+    expect((await readConfig(root))!.branchMappings['__default__']).toEqual({ appId: 'A', appName: 'MyApp' });
+    expect((await readLocalState(root))['__default__']!.scripts.s).toBeDefined();
   });
 
-  it('does not prompt for a brand-new branch when there is no "" state', async () => {
+  it('does not prompt for a brand-new branch when there is no __default__ state', async () => {
     const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
     const plan = await syncStatus(root, TICKET, 'main', { fetch: b.fetch });
     expect(plan.find((p) => p.path === 's')!.action).toBe('pull-new');
   });
 
-  it('prompts to adopt the "" state onto a real branch, then migrates and drops ""', async () => {
+  it('prompts to adopt the __default__ state onto a real branch, then migrates and drops it', async () => {
     const b = fakeBuilder({ s: { scriptId: 'r1', version: 1, body: 'x();' } });
-    await pull(root, TICKET, '', { fetch: b.fetch, now: NOW }); // first sync, no git → "" key
+    await pull(root, TICKET, NO_GIT, { fetch: b.fetch, now: NOW }); // first sync, no git → __default__
 
-    // Now "on branch main": main has no state, "" does → refuse until adoption is confirmed.
+    // Now "on branch main": main has no state, __default__ does → refuse until adoption confirmed.
     await expect(syncStatus(root, TICKET, 'main', { fetch: b.fetch }))
       .rejects.toThrow(/adoptNoGitBranch/);
 
-    // Adopt: "" state + mapping move to main, "" is dropped.
+    // Adopt: __default__ state + mapping move to main, __default__ is dropped.
     await pull(root, TICKET, 'main', { fetch: b.fetch, now: NOW, adoptNoGitBranch: true });
 
     const cfg = await readConfig(root);
-    expect(cfg!.branchMappings['']).toBeUndefined();
+    expect(cfg!.branchMappings['__default__']).toBeUndefined();
     expect(cfg!.branchMappings['main']).toEqual({ appId: 'A', appName: 'MyApp' });
 
     const local = await readLocalState(root);
-    expect(local['']).toBeUndefined();
+    expect(local['__default__']).toBeUndefined();
     expect(local['main']!.scripts.s).toBeDefined();
 
     // Adopted base means a follow-up status on main is clean.

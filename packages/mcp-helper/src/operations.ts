@@ -30,6 +30,7 @@ import {
   readLocalState,
   writeConfig,
   writeLocalState,
+  NO_GIT_BRANCH,
 } from './state.js';
 
 export interface SyncOptions extends HttpOptions {
@@ -483,7 +484,7 @@ function appMismatchError(
  * state to adopt (a genuinely brand-new branch — the normal first-time-binding case).
  */
 async function maybeMigrateNoGit(rootDir: string, branch: string, options: SyncOptions): Promise<void> {
-  if (!branch) {
+  if (!branch || branch === NO_GIT_BRANCH) {
     return;
   }
   const config = (await readConfig(rootDir)) ?? { branchMappings: {} };
@@ -494,8 +495,8 @@ async function maybeMigrateNoGit(rootDir: string, branch: string, options: SyncO
   if (branchEstablished) {
     return;
   }
-  const noGitMapping = config.branchMappings[''];
-  const noGitState = local[''];
+  const noGitMapping = config.branchMappings[NO_GIT_BRANCH];
+  const noGitState = local[NO_GIT_BRANCH];
   const hasNoGitState = noGitMapping !== undefined || Object.keys(noGitState?.scripts ?? {}).length > 0;
   if (!hasNoGitState) {
     return;
@@ -505,12 +506,12 @@ async function maybeMigrateNoGit(rootDir: string, branch: string, options: SyncO
   }
   if (noGitMapping !== undefined) {
     config.branchMappings[branch] = noGitMapping;
-    delete config.branchMappings[''];
+    delete config.branchMappings[NO_GIT_BRANCH];
     await writeConfig(rootDir, config);
   }
   if (noGitState !== undefined) {
     local[branch] = noGitState;
-    delete local[''];
+    delete local[NO_GIT_BRANCH];
     await writeLocalState(rootDir, local);
   }
 }

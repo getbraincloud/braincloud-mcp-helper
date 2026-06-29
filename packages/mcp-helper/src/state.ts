@@ -12,6 +12,14 @@ import {
 const BCSYNC = '.bcsync';
 const BCSYNC_LOCAL = '.bcsync.local';
 
+/**
+ * Branch key used when a folder is not a git repo. MUST stay equal to the brainCloud VS Code
+ * extension's sentinel ("__default__") so the shared `.bcsync` branch→app mapping interoperates
+ * across both tools on the same folder. (Defined here for now; a future cloudsync-core release
+ * should own this as part of converging the on-disk contract — see BCLOUD-14117.)
+ */
+export const NO_GIT_BRANCH = '__default__';
+
 /** Read the committed `.bcsync` config, or `undefined` if absent. */
 export async function readConfig(rootDir: string): Promise<BcSyncConfig | undefined> {
   const text = await readFileOpt(path.join(rootDir, BCSYNC));

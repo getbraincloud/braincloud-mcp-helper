@@ -1,11 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import { currentBranch, resolveSyncRoot } from './state.js';
+import { currentBranch, resolveSyncRoot, NO_GIT_BRANCH } from './state.js';
 import { pull, push, sync, syncStatus, type SyncOptions } from './operations.js';
 import type { SyncTicket } from './http.js';
 
-export const HELPER_VERSION = '0.3.0-dev.1';
+export const HELPER_VERSION = '0.3.0-dev.2';
 
 /**
  * The sync ticket, as vended by the hosted braincloud-mcp's `getSyncTicket` tool. The helper
@@ -181,10 +181,10 @@ async function resolveBranch(rootDir: string, provided?: string): Promise<string
   if (provided && provided.trim()) {
     return provided.trim();
   }
-  // No explicit branch: use the git branch if there is one, else the reserved no-git ("") key.
-  // "" can never be a real branch name, so it never collides; it can later be adopted onto a
-  // real branch (see maybeMigrateNoGit) once the folder becomes a git repo.
-  return (await currentBranch(rootDir)) ?? '';
+  // No explicit branch: use the git branch if there is one, else the reserved no-git key
+  // (NO_GIT_BRANCH, shared with the VS Code extension). It can later be adopted onto a real
+  // branch (see maybeMigrateNoGit) once the folder becomes a git repo.
+  return (await currentBranch(rootDir)) ?? NO_GIT_BRANCH;
 }
 
 /** Wrap a handler so its return value is serialised, and errors become an MCP error result. */
