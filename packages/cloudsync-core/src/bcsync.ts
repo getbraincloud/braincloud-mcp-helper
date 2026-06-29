@@ -32,10 +32,25 @@ export interface ScriptSyncRecord {
   sha256: string;
 }
 
+/**
+ * `.bcsync.local` format version, shared with the brainCloud VS Code extension. Version 2 means the
+ * per-script hashes are body-hashes (computeSyncHash) — which the helper and the extension compute
+ * identically — so the two tools can read each other's base hashes. Below 2 are legacy raw-file
+ * hashes and are not cross-compatible (a tool re-baselines rather than trust them).
+ */
+export const LOCAL_FORMAT_VERSION = 2;
+
 export interface BranchSyncState {
   lastSynced?: string;
+  /** `.bcsync.local` format version; {@link LOCAL_FORMAT_VERSION} (2) = body-hash content hashes. */
+  formatVersion?: number;
   /** path → version. Kept in sync with `scripts` so the VS Code extension keeps working. */
   scriptVersions: Record<string, number>;
+  /**
+   * path → sha256 body-hash — the VS Code extension's hash map. Written alongside `scripts` (same
+   * values as `scripts[path].sha256`) so a folder the helper syncs is readable by the extension.
+   */
+  contentHashes?: Record<string, string>;
   /** path → richer base record. The MCP source of truth for change detection. */
   scripts: Record<string, ScriptSyncRecord>;
   /** Unknown per-branch fields (e.g. ones a future VS Code version adds) are preserved. */
@@ -129,9 +144,13 @@ export function upsertBranchScript(
   const state = getOrCreateBranchState(local, branch);
   state.scripts[scriptPath] = record;
   state.scriptVersions[scriptPath] = record.version;
+  // Mirror the hash into the VS Code extension's contentHashes map (+ format version) so a folder
+  // the helper syncs is readable by the extension without re-baselining. See LOCAL_FORMAT_VERSION.
+  (state.contentHashes ??= {})[scriptPath] = record.sha256;
+  state.formatVersion = LOCAL_FORMAT_VERSION;
 }
 
-/** Remove a script from both maps for a branch (e.g. after a delete sync). Mutates `local`. */
+/** Remove a script from all maps for a branch (e.g. after a delete sync). Mutates `local`. */
 export function removeBranchScript(local: BcSyncLocal, branch: string, scriptPath: string): void {
   const state = local[branch];
   if (!state) {
@@ -139,6 +158,9 @@ export function removeBranchScript(local: BcSyncLocal, branch: string, scriptPat
   }
   delete state.scripts[scriptPath];
   delete state.scriptVersions[scriptPath];
+  if (state.contentHashes) {
+    delete state.contentHashes[scriptPath];
+  }
 }
 
 // --------------------------------------------------------------------------------------------
@@ -156,6 +178,15 @@ function normalizeBranchState(state: Record<string, unknown>): BranchSyncState {
     }
   }
 
+  const contentHashes: Record<string, string> = {};
+  if (isPlainObject(state.contentHashes)) {
+    for (const [path, hash] of Object.entries(state.contentHashes)) {
+      if (typeof hash === 'string') {
+        contentHashes[path] = hash;
+      }
+    }
+  }
+
   const scripts: Record<string, ScriptSyncRecord> = {};
   if (isPlainObject(state.scripts)) {
     for (const [path, rec] of Object.entries(state.scripts)) {
@@ -169,7 +200,27 @@ function normalizeBranchState(state: Record<string, unknown>): BranchSyncState {
     }
   }
 
-  return { ...state, scriptVersions, scripts };
+  // Cross-tool bridge: a `.bcsync.local` written by the VS Code extension carries its base hashes in
+  // `contentHashes` (+ formatVersion 2) and no `scripts` map. Those are the same body-hashes the
+  // helper uses, so backfill the richer `scripts` map for any path the extension recorded but we
+  // don't have — letting the helper trust the extension's base. scriptId is unknown here; the helper
+  // recovers it from the live remote when it needs a merge base (baseRec.scriptId ?? meta.scriptId).
+  const formatVersion = typeof state.formatVersion === 'number' ? state.formatVersion : undefined;
+  if (formatVersion === LOCAL_FORMAT_VERSION) {
+    for (const [path, sha256] of Object.entries(contentHashes)) {
+      if (!scripts[path]) {
+        scripts[path] = { version: scriptVersions[path] ?? 0, sha256 };
+      }
+    }
+  }
+
+  return {
+    ...state,
+    scriptVersions,
+    scripts,
+    ...(Object.keys(contentHashes).length > 0 ? { contentHashes } : {}),
+    ...(formatVersion !== undefined ? { formatVersion } : {}),
+  };
 }
 
 function parseJsonObject(json: string, label: string): Record<string, unknown> {
