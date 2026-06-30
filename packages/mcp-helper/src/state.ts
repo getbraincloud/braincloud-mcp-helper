@@ -13,6 +13,19 @@ const BCSYNC = '.bcsync';
 const BCSYNC_LOCAL = '.bcsync.local';
 
 /**
+ * Folder names the downstream probe is allowed to descend into when the upward walk finds no
+ * `.bcsync`. Matched case- and separator-insensitively (see {@link normalizeFolderName}), so
+ * `cloud_code`, `cloudCode` and `CloudCode` all collapse to one entry. This deliberately bounds
+ * the downward search to the handful of conventional cloud-code locations instead of scanning the
+ * whole tree — e.g. a project whose scripts live at `cloud_code/scripts/.bcsync` while the helper
+ * is launched from the project root.
+ */
+const DOWNSTREAM_FOLDER_NAMES = new Set(['scripts', 'cloudcode', 'braincloud', 'bc']);
+
+/** How many allowlisted folders deep the downstream probe will descend before giving up. */
+const DOWNSTREAM_MAX_DEPTH = 5;
+
+/**
  * Branch key used when a folder is not a git repo. MUST stay equal to the brainCloud VS Code
  * extension's sentinel ("__default__") so the shared `.bcsync` branch→app mapping interoperates
  * across both tools on the same folder. (Defined here for now; a future cloudsync-core release
@@ -57,22 +70,35 @@ export async function ensureGitignore(rootDir: string): Promise<void> {
 
 /**
  * Resolve the sync folder for an operation. An explicit `rootDir` always wins (resolved to an
- * absolute path). Otherwise the folder is discovered by walking up from `startDir` (default the
- * helper's working directory) to the nearest folder holding a `.bcsync` / `.bcsync.local` — the
- * same "find the repo root" pattern git uses — so a client launched inside a synced folder need
- * not repeat the path. Throws an actionable error when neither is available (e.g. a brand-new
- * folder, before its first sync, which has no `.bcsync` yet).
+ * absolute path). Otherwise the folder is discovered in two passes from `startDir` (default the
+ * helper's working directory):
+ *
+ *  1. Walk *up* to the nearest folder holding a `.bcsync` / `.bcsync.local` — the same "find the
+ *     repo root" pattern git uses — so a client launched inside a synced folder need not repeat
+ *     the path.
+ *  2. If nothing is found above, probe *down* through conventional cloud-code folder names
+ *     ({@link DOWNSTREAM_FOLDER_NAMES}) — so a helper launched at the project root still finds a
+ *     sync folder nested at e.g. `cloud_code/scripts/.bcsync`.
+ *
+ * Throws an actionable error when neither pass finds a folder (e.g. a brand-new folder, before its
+ * first sync, which has no `.bcsync` yet), or when the downward probe is ambiguous (two distinct
+ * sync folders at the same shallowest depth).
  */
 export async function resolveSyncRoot(rootDir?: string, startDir: string = process.cwd()): Promise<string> {
   if (rootDir && rootDir.trim()) {
     return path.resolve(rootDir.trim());
   }
-  const found = await findSyncRoot(startDir);
-  if (found) {
-    return found;
+  const above = await findSyncRoot(startDir);
+  if (above) {
+    return above;
+  }
+  const below = await findSyncRootDownstream(startDir);
+  if (below) {
+    return below;
   }
   throw new Error(
-    `No rootDir given and no .bcsync sync folder found at or above ${path.resolve(startDir)}. ` +
+    `No rootDir given and no .bcsync sync folder found at or above ${path.resolve(startDir)}, ` +
+      `nor in a conventional cloud-code subfolder below it (${[...DOWNSTREAM_FOLDER_NAMES].join(', ')}). ` +
       `Pass rootDir (an absolute path to the sync folder), or run the client from inside a synced ` +
       `folder. A brand-new folder has no .bcsync until its first sync — pass rootDir that first time.`
   );
@@ -83,10 +109,7 @@ async function findSyncRoot(startDir: string): Promise<string | undefined> {
   let current = path.resolve(startDir);
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    if (
-      (await statOpt(path.join(current, BCSYNC)))?.isFile() ||
-      (await statOpt(path.join(current, BCSYNC_LOCAL)))?.isFile()
-    ) {
+    if (await hasSyncMarker(current)) {
       return current;
     }
     const parent = path.dirname(current);
@@ -95,6 +118,66 @@ async function findSyncRoot(startDir: string): Promise<string | undefined> {
     }
     current = parent;
   }
+}
+
+/**
+ * Probe *down* from `startDir` for a sync folder, descending only into folders whose name is in
+ * {@link DOWNSTREAM_FOLDER_NAMES}. Breadth-first so the shallowest match wins; throws if two
+ * distinct sync folders are found at that same shallowest depth (ambiguous — caller should pass an
+ * explicit `rootDir`). Returns `undefined` if nothing is found within {@link DOWNSTREAM_MAX_DEPTH}.
+ */
+async function findSyncRootDownstream(startDir: string): Promise<string | undefined> {
+  let frontier = [path.resolve(startDir)];
+  for (let depth = 0; depth < DOWNSTREAM_MAX_DEPTH && frontier.length > 0; depth++) {
+    const allowedChildren = (
+      await Promise.all(frontier.map((dir) => allowedSubdirs(dir)))
+    ).flat();
+
+    const hits: string[] = [];
+    for (const dir of allowedChildren) {
+      if (await hasSyncMarker(dir)) {
+        hits.push(dir);
+      }
+    }
+    if (hits.length === 1) {
+      return hits[0];
+    }
+    if (hits.length > 1) {
+      throw new Error(
+        `Ambiguous .bcsync sync folders found below ${path.resolve(startDir)}:\n` +
+          hits.map((h) => `  - ${h}`).join('\n') +
+          `\nPass rootDir (an absolute path) to choose one.`
+      );
+    }
+    frontier = allowedChildren;
+  }
+  return undefined;
+}
+
+/** True if `dir` holds a `.bcsync` or `.bcsync.local` file. */
+async function hasSyncMarker(dir: string): Promise<boolean> {
+  return (
+    (await statOpt(path.join(dir, BCSYNC)))?.isFile() === true ||
+    (await statOpt(path.join(dir, BCSYNC_LOCAL)))?.isFile() === true
+  );
+}
+
+/** Absolute paths of `dir`'s immediate subdirectories whose name is in the downstream allowlist. */
+async function allowedSubdirs(dir: string): Promise<string[]> {
+  let entries: import('node:fs').Dirent[];
+  try {
+    entries = await fs.readdir(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries
+    .filter((e) => e.isDirectory() && DOWNSTREAM_FOLDER_NAMES.has(normalizeFolderName(e.name)))
+    .map((e) => path.join(dir, e.name));
+}
+
+/** Lower-case and strip separators so `cloud_code`, `cloudCode` and `CloudCode` all match. */
+function normalizeFolderName(name: string): string {
+  return name.toLowerCase().replace(/[-_\s]/g, '');
 }
 
 /**
